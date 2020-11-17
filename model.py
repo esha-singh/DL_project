@@ -34,6 +34,15 @@ class ArcFace(nn.Module):
         self.cosine_weights = cosine_weights
         
     def forward(self, global_features):
+        """
+        Parameters
+        ----------
+        global_features : float tensor with shape [batch_size, embedding_size]
+        
+        Returns
+        -------
+        logits : float tensorwith shape [batch_size, num_classes]
+        """
         norm_global_features = F.normalize(global_features)
         norm_cosine_weights = F.normalize(self.cosine_weights)
         cosine_sim = torch.mm(norm_cosine_weights, norm_global_features)
@@ -47,6 +56,16 @@ class ArcFace(nn.Module):
         return logits
     
     def apply_arcface_margin(self, cosine_sim, one_hot_labels):
+        """
+        Parameters
+        ----------
+        cosine_sim: float tensor with shape [batch_size, num_classes]
+        one_hot_labels: int tensor with shape [batch_size, num_classes]
+
+        Returns
+        -------
+        cosine_sim_with_margin: float tensor with shape [batch_size, num_classes]
+        """
         theta = torch.acos(cosine_sim)
         selected_labels = torch.where(torch.greater(theta, math.pi - self.arcface_margin),
                                       torch.zero_like(one_hot_labels),
@@ -54,12 +73,12 @@ class ArcFace(nn.Module):
         final_theta = torch.where(selected_labels.type(torch.bool),
                                   theta + self.arcface_margin,
                                   theta)
-        
-        return torch.cos(final_theta)
+        cosine_sim_with_margin = torch.cos(final_theta)
+        return cosine_sim_with_margin
         
     
 class DelgGlobal(nn.module):
-    def __init__(self, labels, num_classes, embedding_size, pretrained):
+    def __init__(self, labels, num_classes, embedding_size, pretrained=True):
         super(DelgGlobal, self).__init__()
         self.labels = labels
         self.num_classes = num_classes
