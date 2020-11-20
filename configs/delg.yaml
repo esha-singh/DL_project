@@ -1,0 +1,27 @@
+SYSTEM:
+    DEVICE: "cuda:0"
+    NUM_WORKERS: 4
+MODEL:
+    BACKBONE: "resnet50" # lenet, lenet_spatial, vgg11_bn, vgg16_bn
+    MODEL: "delg_global"
+    MODEL_DIR: "models"
+DATASET:
+    DATA_DIR: "train"
+    TRAIN_CSV: "train_small.csv"
+    IMAGE_SIZE: 512
+TRAIN:
+    BATCH_SIZE: 8
+    EPOCHS: 50
+    OPTIM:
+        OPTIMIZER: "sgd"
+        BASE_LR: 0.001
+        SGD_MOMENTUM: 0.9
+        ADAM_BETAS: (0.9, 0.95)
+        LR_DECAY_RATE: 0.5
+        LR_DECAY_FREQUENCY: 10
+EVAL:
+    MODEL_PATH: "" # For test.py
+    BATCH_SIZE: 8
+    SAVE_FREQUENCY: 25
+    SAVE_DIR: "./output"
+

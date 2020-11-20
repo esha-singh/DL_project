@@ -2,6 +2,7 @@ import os
 import cv2
 import math
 import time
+import datetime
 import pickle
 import random
 import argparse
@@ -19,12 +20,13 @@ import torch.optim as optim
 from torch.optim import lr_scheduler
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.backends import cudnn
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-
+from logger import setup_logger
+from configs import get_cfg_defaults
 from dataset import LandmarkDataset, get_df, get_transforms
 from metrics import global_average_precision_score
-from model import ArcFace, apply_arcface_margin, GeM, DelgGlobal
-from resnet import ResNet
+from model import DelgGlobal
 
 def set_seed(seed=0):
     random.seed(seed)
@@ -58,16 +60,20 @@ def parse_args():
     return args
 
 
-def train_epoch(model, loader, optimizer, criterion):
-
+def train_epoch(cfg, model, loader, optimizer, criterion):
+    device = cfg.SYSTEM.DEVICE
     model.train()
     train_loss = []
     bar = tqdm(loader)
     for (data, target) in bar:
-
-        data, target = data.cuda(), target.cuda()
+        data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
-
+        
+        logits_m = model(data, target)
+        loss = criterion(logits_m, target)
+        loss.backward()
+        optimizer.step()
+        """
         if not args.use_amp:
             logits_m = model(data)
             loss = criterion(logits_m, target)
@@ -79,9 +85,9 @@ def train_epoch(model, loader, optimizer, criterion):
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
             optimizer.step()
-
+        """
         torch.cuda.synchronize()
-            
+
         loss_np = loss.detach().cpu().numpy()
         train_loss.append(loss_np)
         smooth_loss = sum(train_loss[-100:]) / min(len(train_loss), 100)
@@ -89,8 +95,8 @@ def train_epoch(model, loader, optimizer, criterion):
 
     return train_loss
 
-def val_epoch(model, valid_loader, criterion, get_output=False):
-
+def val_epoch(cfg, model, valid_loader, criterion, get_output=False):
+    device = cfg.SYSTEM.DEVICE
     model.eval()
     val_loss = []
     PRODS_M = []
@@ -99,10 +105,9 @@ def val_epoch(model, valid_loader, criterion, get_output=False):
 
     with torch.no_grad():
         for (data, target) in tqdm(valid_loader):
-            data, target = data.cuda(), target.cuda()
+            data, target = data.to(device), target.to(device)
 
-            logits_m = model(data)
-
+            logits_m = model(data, target, training=False)
             lmax_m = logits_m.max(1)
             probs_m = lmax_m.values
             preds_m = lmax_m.indices
@@ -120,7 +125,7 @@ def val_epoch(model, valid_loader, criterion, get_output=False):
         TARGETS = torch.cat(TARGETS)
 
     if get_output:
-        return LOGITS_M
+        return logits_m
     else:
         acc_m = (PREDS_M == TARGETS.numpy()).mean() * 100.
         y_true = {idx: target if target >=0 else None for idx, target in enumerate(TARGETS)}
@@ -128,59 +133,120 @@ def val_epoch(model, valid_loader, criterion, get_output=False):
         gap_m = global_average_precision_score(y_true, y_pred_m)
         return val_loss, acc_m, gap_m
 
-def optimizers_func(str):
-    optimizer = 0
-    if str == 'adam':
-        optimizer = optim.Adam(model.parameters(), lr=args.init_lr, dec)
-    if str == 'sgd':
-        optimizer = optim.SGD(model.parameters(), lr=args.init_lr)
+def optimizers_func(cfg, model):
+    #optimizer = 0
+    if cfg.TRAIN.OPTIM.OPTIMIZER == 'adam':
+        optimizer = optim.Adam(model.parameters(),
+                              lr=cfg.TRAIN.OPTIM.BASE_LR,
+                              betas=cfg.TRAIN.OPTIM.ADAM_BETAS)
+    if cfg.TRAIN.OPTIM.OPTIMIZER == 'sgd':
+        optimizer = optim.SGD(model.parameters(),
+                              lr=cfg.TRAIN.OPTIM.BASE_LR,
+                              momentum=cfg.TRAIN.OPTIM.SGD_MOMENTUM)
     return optimizer
 
 def main():
+    # Load config file
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config-file",
+        default="configs/Delg_global_train.yaml",
+        metavar="FILE",
+        help="path to config file",
+    )
+    parser.add_argument(
+        "options",
+        default=None,
+        nargs=argparse.REMAINDER
+    )
+    args = parser.parse_args()
 
+    cfg = get_cfg_defaults()
+    cfg.merge_from_file(args.config_file)
+    cfg.freeze()
+
+    device = cfg.SYSTEM.DEVICE
+    
+    # get dataframe
+    df, num_classes = get_df(cfg.DATASET.DATA_DIR, cfg.DATASET.TRAIN_CSV)
+    #print("number of classes: %6d" % num_classes)
 
     # get augmentations
-    transforms_train, transforms_val = get_transforms(args.image_size)
-
-    # get train and valid dataset
-    df_train = df[df['fold'] != args.fold]
-    df_valid = df[df['fold'] == args.fold].reset_index(drop=True).query("index % 15==0")
-
-    dataset_train = LandmarkDataset(df_train, 'train', 'train', transform=transforms_train)
-    dataset_valid = LandmarkDataset(df_valid, 'train', 'val', transform=transforms_val)
-    valid_loader = torch.utils.data.DataLoader(dataset_valid, batch_size=args.batch_size, num_workers=args.num_workers)
+    transforms_train, transforms_val = get_transforms(cfg.DATASET.IMAGE_SIZE)
+    
+    # get dataset
+    dataset_train = LandmarkDataset(df, 'train', transform=transforms_train)
+    dataset_valid = LandmarkDataset(df, 'val', transform=transforms_val)
+    
+    dataset_train, _ = torch.utils.data.random_split(dataset_train, 
+                                                     [math.ceil(0.8*len(dataset_train)), math.floor(0.2*len(dataset_train))],
+                                                     generator=torch.Generator().manual_seed(0))
+    _, dataset_valid = torch.utils.data.random_split(dataset_valid,
+                                                     [math.ceil(0.8*len(dataset_valid)), math.floor(0.2*len(dataset_valid))],
+                                                     generator=torch.Generator().manual_seed(0))
+    
+    valid_loader = torch.utils.data.DataLoader(dataset_valid, 
+                                               batch_size=cfg.TRAIN.BATCH_SIZE, 
+                                               num_workers=cfg.SYSTEM.NUM_WORKERS)
 
     # model
-    model = ModelClass(model)  # not sure
-    model = model.cuda()
+    if cfg.MODEL.MODEL == 'delg_global':
+        model = DelgGlobal(num_classes)  
+    model = model.to(device)
+    #model = DDP(model, device_ids=[0])
 
     # loss func
-    def criterion(logits_m, target):
-        loss_m = ArcFace(logits_m, target) # not sure
-        return loss_m
+    criterion = nn.CrossEntropyLoss()
+    #def criterion(logits_m, target):
+    #    loss_m = ArcFace(logits_m, target) # not sure
+    #    return loss_m
 
     # optimizer
-    optimizer = optimizers_func('adam')
+    optimizer = optimizers_func(cfg, model)
 
-    # # lr scheduler
-    optimizer_anneal = torch.optim.lr_scheduler.OneCycleLR(optimizer,anneal_strategy='linear', max_lr=0.01, epochs = args.n_epochs)
-
+    # lr scheduler
+    #optimizer_anneal = torch.optim.lr_scheduler.OneCycleLR(optimizer,anneal_strategy='linear', max_lr=0.01, epochs = args.n_epochs)
+    
+    # logging
+    ts = time.time()
+    logger = setup_logger('training_info', 'logger', file_name='train-log-' + datetime.datetime.fromtimestamp(ts).strftime('%Y%m%d-%H%M%S') + '.txt')
+    logger.info(cfg)
+    logger.info('numer of classes: %d' % num_classes)
+    
     # train & valid loop
     gap_m_max = 0.
-    model_file = os.path.join(args.model_dir, f'{args.enet_type}_fold{args.fold}.pth')
-    for epoch in range(args.start_from_epoch, args.n_epochs+1):
+    model_file = os.path.join(cfg.MODEL.MODEL_DIR, cfg.MODEL.BACKBONE + '_' + cfg.MODEL.MODEL + '.pth')
+    for epoch in range(cfg.TRAIN.EPOCHS):
 
+        if epoch % cfg.TRAIN.OPTIM.LR_DECAY_FREQUENCY == 0 and epoch != 0:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] *= cfg.TRAIN.OPTIM.LR_DECAY_RATE    
+                    
+        
         print(time.ctime(), 'Epoch:', epoch)
+        tic = time.time()
 
-        train_sampler = torch.utils.data(dataset_train)
-        train_sampler.set_epoch(epoch)
+        #train_sampler = torch.utils.data.distributed.DistributedSampler(dataset_train)
+        #train_sampler.set_epoch(epoch)
 
-        train_loader = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, num_workers=args.num_workers,
-                                                  shuffle=train_sampler is None, sampler=train_sampler, drop_last=True)        
+        #train_loader = torch.utils.data.DataLoader(dataset_train, batch_size=cfg.TRAIN.BATCH_SIZE, num_workers=cfg.SYSTEM.NUM_WORKERS,
+        #                                          shuffle=train_sampler is None, sampler=train_sampler, drop_last=True)     
+        train_loader = torch.utils.data.DataLoader(dataset_train, 
+                                                   batch_size=cfg.TRAIN.BATCH_SIZE, 
+                                                   num_workers=cfg.SYSTEM.NUM_WORKERS, 
+                                                   shuffle=True)
 
-        train_loss = train_epoch(model, train_loader, optimizer_anneal, criterion)
-        val_loss, acc_m, gap_m = val_epoch(model, valid_loader, criterion)
-
+        train_loss = train_epoch(cfg, model, train_loader, optimizer, criterion)
+        val_loss, acc_m, gap_m = val_epoch(cfg, model, valid_loader, criterion)
+        
+        toc = time.time()
+        content = 'epoch: %d, time: %.2f s, lr: %.5f, train loss: %.5f, validation loss: %.5f, acc_m: %.5f, gap_m: %.5f' % (epoch, toc - tic, optimizer.param_groups[0]['lr'], np.mean(train_loss), val_loss, acc_m, gap_m)
+        logger.info(content)
+        torch.save({'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    }, model_file)  
+        """
         if args.local_rank == 0:
             content = time.ctime() + ' ' + f'Fold {args.fold}, Epoch {epoch}, lr: {optimizer_anneal.param_groups[0]["lr"]:.7f}, train loss: {np.mean(train_loss):.5f}, valid loss: {(val_loss):.5f}, acc_m: {(acc_m):.6f}, gap_m: {(gap_m):.6f}.'
             print(content)
@@ -191,32 +257,30 @@ def main():
             torch.save({
                         'epoch': epoch,
                         'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer_anneal.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
                         }, model_file)            
             gap_m_max = gap_m
-
-        if epoch == args.stop_at_epoch:
+        """
+        """
+        if epoch == cfg.TRAIN.EPOCHS:
             print(time.ctime(), 'Training Finished!')
             break
-
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer_anneal.state_dict(),
-    }, os.path.join(args.model_dir, f'{args.enet_type}_fold{args.fold}_final.pth'))
+        """        
 
 
 if __name__ == '__main__':
 
-    args = parse_args()
-    os.makedirs(args.model_dir, exist_ok=True)
-    os.makedirs(args.log_dir, exist_ok=True)
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.CUDA_VISIBLE_DEVICES
-
+    #args = parse_args()
+    #os.makedirs(args.model_dir, exist_ok=True)
+    #os.makedirs(args.log_dir, exist_ok=True)
+    #os.environ['CUDA_VISIBLE_DEVICES'] = args.CUDA_VISIBLE_DEVICES
+    
+    """
     if args.enet_type == 'resnet':
         ModelClass = ResNet
     else:
       print("Error model not read")
-
-    set_seed(0)
+     """
+     
+    #set_seed(0)
     main()

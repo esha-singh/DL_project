@@ -7,33 +7,35 @@ Created on Sat Nov 14 11:23:56 2020
 import math
 import torch
 import torch.nn as nn
-import torch.functional as F
+import torch.nn.functional as F
 from resnet import resnet50
+import torchvision.models as models
 
 
-class GeM(nn.module):
+class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6):
         super(GeM, self).__init__()
-        self.p = nn.Parameter(torch.ones(1)*p)
+        #self.p = nn.Parameter(torch.ones(1)*p)
+        self.p = p
         self.eps = eps
     
     def forward(self, x):
         return self.gem(x, p=self.p, eps = self.eps)
     
     def gem(self, x, p=3, eps=1e-6):
-        return F.avg_pool2d(x.clamp(min=eps).pow(p), (x.size(-2), x,size(-1))).pow(1./p)
+        return F.avg_pool2d(x.clamp(min=eps).pow(p), (x.size(-2), x.size(-1))).pow(1./p)
     
     
 class ArcFace(nn.Module):
-    def __init__(self, cosine_weights, labels, num_classes, training=True, scale_factor=45, arcface_margin=0.1):
-        self.training = training
-        self.labels = labels  
+    def __init__(self, embedding_size, num_classes, scale_factor=45.25, arcface_margin=0.1):
+        super(ArcFace, self).__init__()
         self.num_classes = num_classes
-        self.scale_factor = scale_factor
+        self.scale_factor = nn.Parameter(torch.ones(1)*scale_factor)
         self.arcface_margin = arcface_margin
-        self.cosine_weights = cosine_weights
+        #self.cosine_weights = cosine_weights
+        self.cosine_weights = nn.Parameter(torch.rand(embedding_size, num_classes))
         
-    def forward(self, global_features):
+    def forward(self, global_features, labels, training=True):
         """
         Parameters
         ----------
@@ -43,12 +45,12 @@ class ArcFace(nn.Module):
         -------
         logits : float tensorwith shape [batch_size, num_classes]
         """
-        norm_global_features = F.normalize(global_features)
-        norm_cosine_weights = F.normalize(self.cosine_weights)
-        cosine_sim = torch.mm(norm_cosine_weights, norm_global_features)
+        norm_global_features = F.normalize(global_features, dim=1)
+        norm_cosine_weights = F.normalize(self.cosine_weights, dim=0)
+        cosine_sim = torch.mm(norm_global_features, norm_cosine_weights)
         
-        if self.training and self.arcface_margin > 0:
-            one_hot_labels = F.one_hot(self.labels, self.num_classes)
+        if training and self.arcface_margin > 0:
+            one_hot_labels = F.one_hot(labels, self.num_classes)
             cosine_sim = self.apply_arcface_margin(cosine_sim, one_hot_labels)
         
         logits = self.scale_factor*cosine_sim
@@ -67,8 +69,8 @@ class ArcFace(nn.Module):
         cosine_sim_with_margin: float tensor with shape [batch_size, num_classes]
         """
         theta = torch.acos(cosine_sim)
-        selected_labels = torch.where(torch.greater(theta, math.pi - self.arcface_margin),
-                                      torch.zero_like(one_hot_labels),
+        selected_labels = torch.where(torch.gt(theta, math.pi - self.arcface_margin),
+                                      torch.zeros_like(one_hot_labels),
                                       one_hot_labels)
         final_theta = torch.where(selected_labels.type(torch.bool),
                                   theta + self.arcface_margin,
@@ -77,25 +79,23 @@ class ArcFace(nn.Module):
         return cosine_sim_with_margin
         
     
-class DelgGlobal(nn.module):
-    def __init__(self, labels, num_classes, embedding_size, pretrained=True):
+class DelgGlobal(nn.Module):
+    def __init__(self, num_classes, embedding_size=2048, pretrained=True):
         super(DelgGlobal, self).__init__()
-        self.labels = labels
-        self.num_classes = num_classes
         self.backbone = resnet50(pretrained=pretrained)
         self.gem_pool = GeM()
-        self.arcface = ArcFace(self.cosine_weights, self.labels, self.num_classes)
-        self.embedding = nn.Linear(backbone_out_feature_size, embedding_size)
-        self.cosine_weights = nn.Linear(embedding_size, num_classes)
-    
-    def forward(self, image):
+        self.embedding = nn.Linear(self.backbone.fc.in_features, embedding_size) # backbone_out_feature_size not sure. probably 2048
+        #self.cosine_weights = nn.Parameter(torch.rand(embedding_size, num_classes))
+        self.arcface = ArcFace(embedding_size, num_classes)
+        
+    def forward(self, image, labels, training=True):
         _, global_f = self.backbone(image)
         x = self.gem_pool(global_f)
         x = x.view(x.size(0), -1)
         x = self.embedding(x)
-        x = self.arcface(x)
+        logits_m = self.arcface(x, labels, training)
         
-        return x
+        return logits_m
         
         
     

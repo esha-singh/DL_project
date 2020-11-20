@@ -5,7 +5,7 @@ November 18, 2020
 
 """
 
-
+import os
 import matplotlib.pyplot as plt
 import cv2
 import random
@@ -16,10 +16,9 @@ import torch
 from torch.utils.data import Dataset
 
 class LandmarkDataset(Dataset):
-    def __init__(self, csv, split, mode, transform=None):
+    def __init__(self, csv, mode, transform=None):
 
         self.csv = csv.reset_index()
-        self.split = split
         self.mode = mode
         self.transform = transform
 
@@ -44,6 +43,7 @@ class LandmarkDataset(Dataset):
             return torch.tensor(image), torch.tensor(row.landmark_id)
 
 def get_transforms(image_size):
+    
     transform_train = A.Compose([
         A.RandomRotate90(),
         A.Flip(),
@@ -75,19 +75,42 @@ def get_transforms(image_size):
         A.Cutout(max_h_size=int(image_size * 0.4), max_w_size=int(image_size * 0.4), num_holes=1, p=0.5),
         A.Normalize()
     ])
-
-    transform_val = albumentations.Compose([
-              albumentations.Resize(image_size, image_size),
-              albumentations.Normalize()
-          ])
+    """
+    transform_train = A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.ImageCompression(quality_lower=99, quality_upper=100),
+        A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=10, border_mode=0, p=0.7),
+        A.Resize(image_size, image_size),
+        A.Cutout(max_h_size=int(image_size * 0.4), max_w_size=int(image_size * 0.4), num_holes=1, p=0.5),
+        A.Normalize()
+    ])
+    """
+    transform_val = A.Compose([
+        A.Resize(image_size, image_size),
+        A.Normalize()
+    ])
 
     return transform_train, transform_val
 
- def visualize(image):
+def visualize(image):
     plt.figure(figsize=(10, 10))
     plt.axis('off')
     plt.imshow(image)
 
+
+def get_df(data_dir, train_csv):
+    # read train.csv
+    df = pd.read_csv(train_csv)
+    
+    # add file path to df
+    df['filepath'] = df['id'].apply(lambda x: os.path.join(data_dir, x[0], x[1], x[2], f'{x}.jpg'))
+
+    landmark_id2idx = {landmark_id: idx for idx, landmark_id in enumerate(sorted(df['landmark_id'].unique()))}
+    df['landmark_id'] = df['landmark_id'].map(landmark_id2idx)
+
+    num_classes = df.landmark_id.nunique()
+
+    return df, num_classes
 
 ####### Testing/Visualisation code ########
 # random.seed(42) 
