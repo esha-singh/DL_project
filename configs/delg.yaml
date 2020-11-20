@@ -2,7 +2,7 @@ SYSTEM:
     DEVICE: "cuda:0"
     NUM_WORKERS: 4
 MODEL:
-    BACKBONE: "resnet50" # lenet, lenet_spatial, vgg11_bn, vgg16_bn
+    BACKBONE: "resnet50" 
     MODEL: "delg_global"
     MODEL_DIR: "models"
 DATASET:
