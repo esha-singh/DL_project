@@ -8,7 +8,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from resnet import resnet50
+#from resnet import resnet50
 import torchvision.models as models
 
 
@@ -82,14 +82,18 @@ class ArcFace(nn.Module):
 class DelgGlobal(nn.Module):
     def __init__(self, num_classes, embedding_size=2048, pretrained=True):
         super(DelgGlobal, self).__init__()
-        self.backbone = resnet50(pretrained=pretrained)
+        resnet = models.resnet.resnet50(pretrained=True)
+        self.backbone_to_conv4 = nn.Sequential(*list(resnet.children()))[:-3]
+        self.backbone_conv5 = nn.Sequential(*list(resnet.children()))[-3]
+        #self.backbone = resnet50(pretrained=pretrained)
         self.gem_pool = GeM()
-        self.embedding = nn.Linear(self.backbone.fc.in_features, embedding_size) # backbone_out_feature_size not sure. probably 2048
+        self.embedding = nn.Linear(resnet.fc.in_features, embedding_size) # backbone_out_feature_size not sure. probably 2048
         #self.cosine_weights = nn.Parameter(torch.rand(embedding_size, num_classes))
         self.arcface = ArcFace(embedding_size, num_classes)
         
     def forward(self, image, labels, training=True):
-        _, global_f = self.backbone(image)
+        local_f = self.backbone_to_conv4(image)
+        global_f = self.backbone_conv5(local_f)
         x = self.gem_pool(global_f)
         x = x.view(x.size(0), -1)
         x = self.embedding(x)

@@ -242,10 +242,13 @@ def main():
         toc = time.time()
         content = 'epoch: %d, time: %.2f s, lr: %.5f, train loss: %.5f, validation loss: %.5f, acc_m: %.5f, gap_m: %.5f' % (epoch, toc - tic, optimizer.param_groups[0]['lr'], np.mean(train_loss), val_loss, acc_m, gap_m)
         logger.info(content)
-        torch.save({'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    }, model_file)  
+        if gap_m > gap_m_max:
+            print('saving best model')
+            torch.save({'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        }, model_file)  
+            gap_m_max = gap_m
         """
         if args.local_rank == 0:
             content = time.ctime() + ' ' + f'Fold {args.fold}, Epoch {epoch}, lr: {optimizer_anneal.param_groups[0]["lr"]:.7f}, train loss: {np.mean(train_loss):.5f}, valid loss: {(val_loss):.5f}, acc_m: {(acc_m):.6f}, gap_m: {(gap_m):.6f}.'
