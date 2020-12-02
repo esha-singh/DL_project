@@ -22,7 +22,7 @@ TRAIN:
         LR_DECAY_RATE: 0.8
         LR_DECAY_FREQUENCY: 2
 EVAL:
-    MODEL_PATH: "models/resnet50_delg_global_best_so_far.pth" # For test.py
+    MODEL_PATH: "models/resnet50_delg_global.pth" # For test.py
     BATCH_SIZE: 4
     SAVE_FREQUENCY: 25
     SAVE_DIR: "./output"
