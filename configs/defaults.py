@@ -19,13 +19,15 @@ _C.MODEL.MODEL = "Delg_global"
 _C.MODEL.MODEL_DIR = "models"
 
 _C.DATASET = CN()
-_C.DATASET.DATA_DIR = "train"
+_C.DATASET.TRAIN_DATA_DIR = "train"
+_C.DATASET.TEST_DATA_DIR = "test"
 _C.DATASET.TRAIN_CSV = "train.csv"
 _C.DATASET.IMAGE_SIZE = 512
 
 _C.TRAIN = CN()
 _C.TRAIN.BATCH_SIZE = 8
 _C.TRAIN.EPOCHS = 25
+_C.TRAIN.FREEZE_BACKBONE = False
 
 _C.TRAIN.OPTIM = CN()
 _C.TRAIN.OPTIM.OPTIMIZER = "adam" # "sgd", "adam", "rmsprop"

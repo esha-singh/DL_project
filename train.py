@@ -3,14 +3,11 @@ import cv2
 import math
 import time
 import datetime
-import pickle
 import random
 import argparse
-import albumentations
 import numpy as np
 import pandas as pd
 from tqdm import tqdm as tqdm
-from sklearn.metrics import confusion_matrix
 
 import torch
 import torch.nn as nn
@@ -18,14 +15,14 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader, Dataset
 import torch.optim as optim
 from torch.optim import lr_scheduler
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, OneCycleLR
 from torch.backends import cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from logger import setup_logger
 from configs import get_cfg_defaults
 from dataset import LandmarkDataset, get_df, get_transforms
-from metrics import global_average_precision_score
+from metrics import global_average_precision_score_val
 from model import DelgGlobal
 
 def set_seed(seed=0):
@@ -62,30 +59,18 @@ def parse_args():
 
 def train_epoch(cfg, model, loader, optimizer, criterion):
     device = cfg.SYSTEM.DEVICE
-    model.train()
+    model = model.train()
     train_loss = []
     bar = tqdm(loader)
-    for (data, target) in bar:
+    for i, (data, target) in enumerate(bar):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         
-        logits_m = model(data, target)
+        _, logits_m = model(data, target)
         loss = criterion(logits_m, target)
         loss.backward()
         optimizer.step()
-        """
-        if not args.use_amp:
-            logits_m = model(data)
-            loss = criterion(logits_m, target)
-            loss.backward()
-            optimizer.step()
-        else:
-            logits_m = model(data)
-            loss = criterion(logits_m, target)
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-            optimizer.step()
-        """
+
         torch.cuda.synchronize()
 
         loss_np = loss.detach().cpu().numpy()
@@ -95,42 +80,99 @@ def train_epoch(cfg, model, loader, optimizer, criterion):
 
     return train_loss
 
-def val_epoch(cfg, model, valid_loader, criterion, get_output=False):
+def val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion, get_output=False):
     device = cfg.SYSTEM.DEVICE
-    model.eval()
+    model = model.eval()
     val_loss = []
     PRODS_M = []
     PREDS_M = []
     TARGETS = []
-
+    
+    PROBS = []
+    PREDS = []
+    TOP_K = 5
     with torch.no_grad():
+        """
+        Compute global descriptor for train set
+        """
+        feats = []
+        gallery_landmark_id = []
+        for (data, target) in tqdm(gallery_loader): 
+            data, target = data.to(device), target.to(device)
+            feat, _ = model(data, labels=None, training=False)
+            feats.append(feat.detach().cpu())
+            gallery_landmark_id.append(target.detach().cpu())
+            
+        gallery_landmark_id = torch.cat(gallery_landmark_id).numpy()
+        feats = torch.cat(feats)
+        feats = feats.to(device)
+        
+        """
+        Compute global descriptor for validation set
+        """
         for (data, target) in tqdm(valid_loader):
             data, target = data.to(device), target.to(device)
 
-            logits_m = model(data, target, training=False)
-            lmax_m = logits_m.max(1)
-            probs_m = lmax_m.values
-            preds_m = lmax_m.indices
+            feat, logits_m = model(data, target, training=False)
+            #softmax_prob = F.softmax(logits_m)
+            
+            # cosine similarity of the current validation image to the images in the train set
+            similarity = feat.mm(feats.t())
+            
+            # Retrieve top-k images from the train set
+            (values, indices) = torch.topk(similarity, TOP_K, dim=1)
+            probs = values
+            preds = indices # indices in the train set
+            PROBS.append(probs.detach().cpu())
+            PREDS.append(preds.detach().cpu())
+            
+            #lmax_m = logits_m.max(1)
+            #probs_m = lmax_m.values
+            #preds_m = lmax_m.indices
 
-            PRODS_M.append(probs_m.detach().cpu())
-            PREDS_M.append(preds_m.detach().cpu())
+            #PRODS_M.append(probs_m.detach().cpu())
+            #PREDS_M.append(preds_m.detach().cpu())
+            
             TARGETS.append(target.detach().cpu())
-
+            
             loss = criterion(logits_m, target)
             val_loss.append(loss.detach().cpu().numpy())
 
         val_loss = np.mean(val_loss)
-        PRODS_M = torch.cat(PRODS_M).numpy()
-        PREDS_M = torch.cat(PREDS_M).numpy()
+        #PRODS_M = torch.cat(PRODS_M).numpy()
+        #PREDS_M = torch.cat(PREDS_M).numpy()
+        
+        PROBS = torch.cat(PROBS).numpy()
+        PREDS = torch.cat(PREDS).numpy()
         TARGETS = torch.cat(TARGETS)
-
+        
+        # Convert the train set indices to landmark ids
+        PREDS = gallery_landmark_id[PREDS]
+        
+        """
+        Get the final prediction of the landmark with the highest score from the top-k retrieved images
+        """
+        PROBS_F = []
+        PREDS_F = []
+        for i in tqdm(range(PREDS.shape[0])):
+            tmp = {}
+            for k in range(TOP_K):
+                pred_k = PREDS[i, k]
+                tmp[pred_k] = tmp.get(pred_k, 0.) + float(PROBS[i, k])
+            
+            pred, conf = max(tmp.items(), key=lambda x: x[1])
+            PREDS_F.append(pred)
+            PROBS_F.append(conf)
+            
+            
     if get_output:
         return logits_m
     else:
-        acc_m = (PREDS_M == TARGETS.numpy()).mean() * 100.
+        acc_m = (PREDS_F == TARGETS.numpy()).mean() * 100.
         y_true = {idx: target if target >=0 else None for idx, target in enumerate(TARGETS)}
-        y_pred_m = {idx: (pred_cls, conf) for idx, (pred_cls, conf) in enumerate(zip(PREDS_M, PRODS_M))}
-        gap_m = global_average_precision_score(y_true, y_pred_m)
+        pred_f = {idx: (pred_cls, conf) for idx, (pred_cls, conf) in enumerate(zip(PREDS_F, PROBS_F))}
+        #y_pred_m = {idx: (pred_cls, conf) for idx, (pred_cls, conf) in enumerate(zip(PREDS_M, PRODS_M))}
+        gap_m = global_average_precision_score_val(y_true, pred_f)
         return val_loss, acc_m, gap_m
 
 def optimizers_func(cfg, model):
@@ -168,7 +210,7 @@ def main():
     device = cfg.SYSTEM.DEVICE
     
     # get dataframe
-    df, num_classes = get_df(cfg.DATASET.DATA_DIR, cfg.DATASET.TRAIN_CSV)
+    df, num_classes = get_df(cfg.DATASET.TRAIN_DATA_DIR, cfg.DATASET.TRAIN_CSV)
     #print("number of classes: %6d" % num_classes)
 
     # get augmentations
@@ -184,32 +226,41 @@ def main():
     _, dataset_valid = torch.utils.data.random_split(dataset_valid,
                                                      [math.ceil(0.8*len(dataset_valid)), math.floor(0.2*len(dataset_valid))],
                                                      generator=torch.Generator().manual_seed(0))
-    
     valid_loader = torch.utils.data.DataLoader(dataset_valid, 
                                                batch_size=cfg.TRAIN.BATCH_SIZE, 
                                                num_workers=cfg.SYSTEM.NUM_WORKERS)
-
+    
+    df_gallery, _ = get_df(cfg.DATASET.TRAIN_DATA_DIR, cfg.DATASET.TRAIN_CSV)
+    dataset_gallery = LandmarkDataset(df_gallery, 'val', transform=transforms_val)
+    dataset_gallery, _ = torch.utils.data.random_split(dataset_gallery, 
+                                                     [math.ceil(0.8*len(dataset_gallery)), math.floor(0.2*len(dataset_gallery))],
+                                                     generator=torch.Generator().manual_seed(0))
+    gallery_loader = torch.utils.data.DataLoader(dataset_gallery, 
+                                                 batch_size=cfg.TRAIN.BATCH_SIZE, 
+                                                 num_workers=cfg.SYSTEM.NUM_WORKERS)
+    
     # model
     if cfg.MODEL.MODEL == 'delg_global':
-        model = DelgGlobal(num_classes)  
+        model = DelgGlobal(num_classes, embedding_size=1024, pretrained=True)  
     model = model.to(device)
     #model = DDP(model, device_ids=[0])
-
+    
+    if cfg.TRAIN.FREEZE_BACKBONE:
+        for param in model.backbone_to_conv4.parameters():
+            param.requires_grad = False
+        
+        for param in model.backbone_conv5.parameters():
+            param.requires_grad = False
+        
     # loss func
     criterion = nn.CrossEntropyLoss()
-    #def criterion(logits_m, target):
-    #    loss_m = ArcFace(logits_m, target) # not sure
-    #    return loss_m
 
     # optimizer
     optimizer = optimizers_func(cfg, model)
 
-    # lr scheduler
-    #optimizer_anneal = torch.optim.lr_scheduler.OneCycleLR(optimizer,anneal_strategy='linear', max_lr=0.01, epochs = args.n_epochs)
-    
     # logging
     ts = time.time()
-    logger = setup_logger('training_info', 'logger', file_name='train-log-' + datetime.datetime.fromtimestamp(ts).strftime('%Y%m%d-%H%M%S') + '.txt')
+    logger = setup_logger('training_info', 'logger/train', file_name='train-log-' + datetime.datetime.fromtimestamp(ts).strftime('%Y%m%d-%H%M%S') + '.txt')
     logger.info(cfg)
     logger.info('numer of classes: %d' % num_classes)
     
@@ -217,7 +268,7 @@ def main():
     gap_m_max = 0.
     model_file = os.path.join(cfg.MODEL.MODEL_DIR, cfg.MODEL.BACKBONE + '_' + cfg.MODEL.MODEL + '.pth')
     for epoch in range(cfg.TRAIN.EPOCHS):
-
+        
         if epoch % cfg.TRAIN.OPTIM.LR_DECAY_FREQUENCY == 0 and epoch != 0:
             for param_group in optimizer.param_groups:
                 param_group['lr'] *= cfg.TRAIN.OPTIM.LR_DECAY_RATE    
@@ -226,18 +277,13 @@ def main():
         print(time.ctime(), 'Epoch:', epoch)
         tic = time.time()
 
-        #train_sampler = torch.utils.data.distributed.DistributedSampler(dataset_train)
-        #train_sampler.set_epoch(epoch)
-
-        #train_loader = torch.utils.data.DataLoader(dataset_train, batch_size=cfg.TRAIN.BATCH_SIZE, num_workers=cfg.SYSTEM.NUM_WORKERS,
-        #                                          shuffle=train_sampler is None, sampler=train_sampler, drop_last=True)     
         train_loader = torch.utils.data.DataLoader(dataset_train, 
                                                    batch_size=cfg.TRAIN.BATCH_SIZE, 
                                                    num_workers=cfg.SYSTEM.NUM_WORKERS, 
                                                    shuffle=True)
 
         train_loss = train_epoch(cfg, model, train_loader, optimizer, criterion)
-        val_loss, acc_m, gap_m = val_epoch(cfg, model, valid_loader, criterion)
+        val_loss, acc_m, gap_m = val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion)
         
         toc = time.time()
         content = 'epoch: %d, time: %.2f s, lr: %.5f, train loss: %.5f, validation loss: %.5f, acc_m: %.5f, gap_m: %.5f' % (epoch, toc - tic, optimizer.param_groups[0]['lr'], np.mean(train_loss), val_loss, acc_m, gap_m)
@@ -249,41 +295,8 @@ def main():
                         'optimizer_state_dict': optimizer.state_dict(),
                         }, model_file)  
             gap_m_max = gap_m
-        """
-        if args.local_rank == 0:
-            content = time.ctime() + ' ' + f'Fold {args.fold}, Epoch {epoch}, lr: {optimizer_anneal.param_groups[0]["lr"]:.7f}, train loss: {np.mean(train_loss):.5f}, valid loss: {(val_loss):.5f}, acc_m: {(acc_m):.6f}, gap_m: {(gap_m):.6f}.'
-            print(content)
-            with open(os.path.join(args.log_dir, f'{args.enet_type}.txt'), 'a') as appender:
-                appender.write(content + '\n')
-
-            print('gap_m_max ({:.6f} --> {:.6f}). Saving model ...'.format(gap_m_max, gap_m))
-            torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        }, model_file)            
-            gap_m_max = gap_m
-        """
-        """
-        if epoch == cfg.TRAIN.EPOCHS:
-            print(time.ctime(), 'Training Finished!')
-            break
-        """        
+        
 
 
 if __name__ == '__main__':
-
-    #args = parse_args()
-    #os.makedirs(args.model_dir, exist_ok=True)
-    #os.makedirs(args.log_dir, exist_ok=True)
-    #os.environ['CUDA_VISIBLE_DEVICES'] = args.CUDA_VISIBLE_DEVICES
-    
-    """
-    if args.enet_type == 'resnet':
-        ModelClass = ResNet
-    else:
-      print("Error model not read")
-     """
-     
-    #set_seed(0)
     main()

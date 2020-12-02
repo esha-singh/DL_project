@@ -6,22 +6,24 @@ MODEL:
     MODEL: "delg_global"
     MODEL_DIR: "models"
 DATASET:
-    DATA_DIR: "train"
-    TRAIN_CSV: "train_small.csv"
-    IMAGE_SIZE: 512
+    TRAIN_DATA_DIR: "train"
+    TEST_DATA_DIR: "test"
+    TRAIN_CSV: "train_sub_class.csv"
+    IMAGE_SIZE: 256
 TRAIN:
-    BATCH_SIZE: 8
-    EPOCHS: 50
+    BATCH_SIZE: 16
+    EPOCHS: 30
+    FREEZE_BACKBONE: False
     OPTIM:
         OPTIMIZER: "sgd"
-        BASE_LR: 0.001
+        BASE_LR: 0.005
         SGD_MOMENTUM: 0.9
         ADAM_BETAS: (0.9, 0.95)
-        LR_DECAY_RATE: 0.5
-        LR_DECAY_FREQUENCY: 10
+        LR_DECAY_RATE: 0.8
+        LR_DECAY_FREQUENCY: 2
 EVAL:
-    MODEL_PATH: "" # For test.py
-    BATCH_SIZE: 8
+    MODEL_PATH: "models/resnet50_delg_global_best_so_far.pth" # For test.py
+    BATCH_SIZE: 4
     SAVE_FREQUENCY: 25
     SAVE_DIR: "./output"
 

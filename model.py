@@ -33,9 +33,14 @@ class ArcFace(nn.Module):
         self.scale_factor = nn.Parameter(torch.ones(1)*scale_factor)
         self.arcface_margin = arcface_margin
         #self.cosine_weights = cosine_weights
-        self.cosine_weights = nn.Parameter(torch.rand(embedding_size, num_classes))
+        self.cosine_weights = nn.Parameter(torch.FloatTensor(embedding_size, num_classes))
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.cosine_weights.size(1))
+        self.cosine_weights.data.uniform_(-stdv, stdv)
         
-    def forward(self, global_features, labels, training=True):
+    def forward(self, global_features, labels=None, training=True):
         """
         Parameters
         ----------
@@ -82,7 +87,7 @@ class ArcFace(nn.Module):
 class DelgGlobal(nn.Module):
     def __init__(self, num_classes, embedding_size=2048, pretrained=True):
         super(DelgGlobal, self).__init__()
-        resnet = models.resnet.resnet50(pretrained=True)
+        resnet = models.resnet.resnet50(pretrained=pretrained)
         self.backbone_to_conv4 = nn.Sequential(*list(resnet.children()))[:-3]
         self.backbone_conv5 = nn.Sequential(*list(resnet.children()))[-3]
         #self.backbone = resnet50(pretrained=pretrained)
@@ -91,7 +96,9 @@ class DelgGlobal(nn.Module):
         #self.cosine_weights = nn.Parameter(torch.rand(embedding_size, num_classes))
         self.arcface = ArcFace(embedding_size, num_classes)
         
-    def forward(self, image, labels, training=True):
+        nn.init.normal_(self.embedding.weight)
+        
+    def forward(self, image, labels=None, training=True):
         local_f = self.backbone_to_conv4(image)
         global_f = self.backbone_conv5(local_f)
         x = self.gem_pool(global_f)
@@ -99,7 +106,7 @@ class DelgGlobal(nn.Module):
         x = self.embedding(x)
         logits_m = self.arcface(x, labels, training)
         
-        return logits_m
+        return F.normalize(x), logits_m
         
         
     
