@@ -6,3 +6,4 @@ tqdm==4.31.1
 opencv_python==4.1.2
 numpy==1.18.5
 scikit_learn==0.23.2
+yacs==0.1.8
