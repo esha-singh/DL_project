@@ -8,7 +8,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-#from resnet import resnet50
 import torchvision.models as models
 
 
@@ -82,7 +81,13 @@ class ArcFace(nn.Module):
                                   theta)
         cosine_sim_with_margin = torch.cos(final_theta)
         return cosine_sim_with_margin
+
+class AttentionModule(nn.Module):
+    def __init__(self, ):
+        super(AttentionModule, self).__init__()
+        self.conv1 = nn.Conv2d(1024, 512, kernel_size=1)
         
+        self.conv2 = nn.Conv2d(512, 1, kernel_size=1)
     
 class DelgGlobal(nn.Module):
     def __init__(self, num_classes, embedding_size=2048, pretrained=True):
@@ -93,6 +98,7 @@ class DelgGlobal(nn.Module):
         #self.backbone = resnet50(pretrained=pretrained)
         self.gem_pool = GeM()
         self.embedding = nn.Linear(resnet.fc.in_features, embedding_size) # backbone_out_feature_size not sure. probably 2048
+        self.prelu = nn.PReLU()
         #self.cosine_weights = nn.Parameter(torch.rand(embedding_size, num_classes))
         self.arcface = ArcFace(embedding_size, num_classes)
         
@@ -104,6 +110,7 @@ class DelgGlobal(nn.Module):
         x = self.gem_pool(global_f)
         x = x.view(x.size(0), -1)
         x = self.embedding(x)
+        x = self.prelu(x)
         logits_m = self.arcface(x, labels, training)
         
         return F.normalize(x), logits_m

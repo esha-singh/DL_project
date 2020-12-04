@@ -192,7 +192,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config-file",
-        default="configs/Delg_global_train.yaml",
+        default="configs/delg.yaml",
         metavar="FILE",
         help="path to config file",
     )

@@ -58,7 +58,7 @@ class LandmarkDataset(Dataset):
 
 def get_transforms(image_size, mode='train'):
     if mode == 'train':
-        
+        """
         transform_train = A.Compose([
             A.RandomRotate90(),
             A.Flip(),
@@ -90,8 +90,8 @@ def get_transforms(image_size, mode='train'):
             A.Cutout(max_h_size=int(image_size * 0.4), max_w_size=int(image_size * 0.4), num_holes=1, p=0.5),
             A.Normalize()
         ])
-        
         """
+        
         transform_train = A.Compose([
             A.HorizontalFlip(p=0.5),
             A.ImageCompression(quality_lower=99, quality_upper=100),
@@ -100,7 +100,7 @@ def get_transforms(image_size, mode='train'):
             A.Cutout(max_h_size=int(image_size * 0.4), max_w_size=int(image_size * 0.4), num_holes=1, p=0.5),
             A.Normalize()
         ])
-        """
+        
         transform_val = A.Compose([
             A.Resize(image_size, image_size),
             A.Normalize()

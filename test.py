@@ -52,13 +52,13 @@ def test(cfg, model, df_gallery, df_query, df_sol, gallery_loader, query_loader,
                 
                 feats.append(feat.detach().cpu())
             feats = torch.cat(feats)
-            torch.save(feats, 'gallery_feats.pt')
+            torch.save(feats, 'gallery_feats_' + str(cfg.DATASET.IMAGE_SIZE) + '.pt')
               
         PROBS = []
         PREDS = []
         #PRODS_M = []
         #PREDS_M = []      
-        feats = torch.load('gallery_feats.pt')
+        feats = torch.load('gallery_feats_' + str(cfg.DATASET.IMAGE_SIZE) + '.pt')
         print(feats.shape)
         feats = feats.to(device)
         
@@ -74,12 +74,16 @@ def test(cfg, model, df_gallery, df_query, df_sol, gallery_loader, query_loader,
             #feat = (feat_0 + feat_1 + feat_2)/3
             #feat = torch.cat([feat_0, feat_1, feat_2], dim=1)
             #feat = F.normalize(feat)
-            
+
             # cosine similarity of the current query image to the images in the gallery set
             similarity = feat.mm(feats.t())
+            #sim_mean = torch.mean(similarity, dim=1, keepdim=True)
+            #similarity *= sim_mean
+            #similarity = F.softmax(similarity, dim=1)
             
             # Retrieve top-k images from the train set
             (values, indices) = torch.topk(similarity, TOP_K, dim=1)
+            #values = F.softmax(values, dim=1)
             probs = values
             preds = indices # indices in the gallery set
             PROBS.append(probs.detach().cpu())
@@ -138,7 +142,7 @@ def main():
     df_query['landmark_id'] = df_query['id'].map(id2sol)
 
     #df_query = df_query.head(100)
-    #df_gallery = df_gallery.head(50000)
+    #df_gallery = df_gallery.head(500)
     
     
     #Eliminate the landmarks that are not in the gallery (train) set
@@ -146,11 +150,11 @@ def main():
     arr = list(dict.fromkeys(arr))
     drop = []
     for idx, row in df_query.iterrows():
-        table = []
+        bool_list = []
         if row['landmark_id'] is not None:
             for landmark in row['landmark_id']:
-                table.append(landmark in arr)
-            if not any(table):
+                bool_list.append(landmark in arr)
+            if not any(bool_list):
                 drop.append(idx)
     df_query.drop(df_query.index[drop], inplace=True)
     
