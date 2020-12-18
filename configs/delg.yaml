@@ -8,7 +8,7 @@ MODEL:
 DATASET:
     TRAIN_DATA_DIR: "train"
     TEST_DATA_DIR: "test"
-    TRAIN_CSV: "train_sub_class.csv"
+    TRAIN_CSV: "train_small_class.csv"
     IMAGE_SIZE: 256
 TRAIN:
     BATCH_SIZE: 16
@@ -22,8 +22,7 @@ TRAIN:
         LR_DECAY_RATE: 0.8
         LR_DECAY_FREQUENCY: 2
 EVAL:
-    MODEL_PATH: "models/resnet50_delg_global.pth" # For test.py
+    MODEL_PATH: "models/resnet50_delg_global_best_so_far.pth" # For test.py
     BATCH_SIZE: 4
-    SAVE_FREQUENCY: 25
     SAVE_DIR: "./output"
 

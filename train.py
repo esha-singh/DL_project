@@ -57,35 +57,67 @@ def parse_args():
     return args
 
 
-def train_epoch(cfg, model, loader, optimizer, criterion):
+def train_global_epoch(cfg, model, loader, criterion, optimizer):
     device = cfg.SYSTEM.DEVICE
     model = model.train()
-    train_loss = []
+    global_train_loss = []
+    attn_train_loss = []
     bar = tqdm(loader)
     for i, (data, target) in enumerate(bar):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
-        
-        _, logits_m = model(data, target)
-        loss = criterion(logits_m, target)
-        loss.backward()
+        global_f, global_logits = model(data, target, global_only=True, training=True)
+        loss_global = criterion(global_logits, target)
+        loss_global.backward() 
         optimizer.step()
-
+            
         torch.cuda.synchronize()
+        
+        loss_global_np = loss_global.detach().cpu().numpy()
+        global_train_loss.append(loss_global_np)
+        global_smooth_loss = sum(global_train_loss[-100:]) / min(len(global_train_loss), 100)
+        bar.set_description('global loss: %.5f, global smth: %.5f' % (loss_global_np, global_smooth_loss))
+    
+    return global_train_loss
+    
 
-        loss_np = loss.detach().cpu().numpy()
-        train_loss.append(loss_np)
-        smooth_loss = sum(train_loss[-100:]) / min(len(train_loss), 100)
-        bar.set_description('loss: %.5f, smth: %.5f' % (loss_np, smooth_loss))
+def train_local_epoch(cfg, model, loader, criterion, optimizer):
+    for param in model.backbone_to_conv4.parameters():
+        param.requires_grad = False
+    for param in model.backbone_conv5.parameters():
+        param.requires_grad = False
+            
+    device = cfg.SYSTEM.DEVICE
+    model = model.train()
+    attn_train_loss = []
+    bar = tqdm(loader)
+    for i, (data, target) in enumerate(bar):
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()
+        global_f, global_logits, attn_f, attn_logits, score, prob = model(data, target, global_only=False, training=True)
+        loss_attn = criterion(attn_logits, target)
+        loss_attn.backward()
+        optimizer.step()
+            
+        torch.cuda.synchronize()
+        
+        loss_attn_np = loss_attn.detach().cpu().numpy()
+        attn_train_loss.append(loss_attn_np)
+        attn_smooth_loss = sum(attn_train_loss[-100:]) / min(len(attn_train_loss), 100)
+        bar.set_description('attn loss: %.5f, attn smth: %.5f' % (loss_attn_np, attn_smooth_loss))
+       
+    return attn_train_loss
 
-    return train_loss
-
-def val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion, get_output=False):
+    
+def val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion, global_only=False):
     device = cfg.SYSTEM.DEVICE
     model = model.eval()
-    val_loss = []
-    PRODS_M = []
-    PREDS_M = []
+    global_val_loss = []
+    attn_val_loss = []
+    GLOBAL_PROBS = []
+    GLOBAL_PREDS = []
+    ATTN_PROBS = []
+    ATTN_PREDS = []
     TARGETS = []
     
     PROBS = []
@@ -93,8 +125,7 @@ def val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion, g
     TOP_K = 5
     with torch.no_grad():
         """
-        Compute global descriptor for train set
-        """
+        #Compute global descriptor for train set
         feats = []
         gallery_landmark_id = []
         for (data, target) in tqdm(gallery_loader): 
@@ -106,52 +137,97 @@ def val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion, g
         gallery_landmark_id = torch.cat(gallery_landmark_id).numpy()
         feats = torch.cat(feats)
         feats = feats.to(device)
+        """
+        if not global_only:
+            for (data, target) in tqdm(valid_loader):
+                data, target = data.to(device), target.to(device)
+            
+                global_f, global_logits, attn_f, attn_logits, score, prob = model(data, target, training=False)
+                global_softmax_prob = F.softmax(global_logits, dim=1)
+                attn_softmax_prob = F.softmax(attn_logits, dim=1)
+                
+                global_max = global_softmax_prob.max(1)
+                global_probs = global_max.values
+                global_preds = global_max.indices
+                
+                attn_max = attn_softmax_prob.max(1)
+                attn_probs = attn_max.values
+                attn_preds = attn_max.indices
+                
+                GLOBAL_PROBS.append(global_probs.detach().cpu())
+                GLOBAL_PREDS.append(global_preds.detach().cpu())
+                ATTN_PROBS.append(attn_probs.detach().cpu())
+                ATTN_PREDS.append(attn_preds.detach().cpu())
+                
+                TARGETS.append(target.detach().cpu())
+                
+                global_loss = criterion(global_logits, target)
+                global_val_loss.append(global_loss.detach().cpu().numpy())
+                attn_loss = criterion(attn_logits, target)
+                attn_val_loss.append(attn_loss.detach().cpu().numpy())
+        
+            global_val_loss = np.mean(global_val_loss)
+            attn_val_loss = np.mean(attn_val_loss)
+            GLOBAL_PROBS = torch.cat(GLOBAL_PROBS).numpy()
+            GLOBAL_PREDS = torch.cat(GLOBAL_PREDS).numpy()
+            ATTN_PROBS = torch.cat(ATTN_PROBS).numpy()
+            ATTN_PREDS = torch.cat(ATTN_PREDS).numpy()
+            
+            #PROBS = torch.cat(PROBS).numpy()
+            #PREDS = torch.cat(PREDS).numpy()
+            TARGETS = torch.cat(TARGETS)
+        else:
+            #Compute global descriptor for validation set
+            for (data, target) in tqdm(valid_loader):
+                data, target = data.to(device), target.to(device)
+                
+                
+                feat, global_logits = model(data, target, global_only=False, training=False)
+                global_softmax_prob = F.softmax(global_logits)
+                """
+                # cosine similarity of the current validation image to the images in the train set
+                similarity = feat.mm(feats.t())
+                
+                # Retrieve top-k images from the train set
+                (values, indices) = torch.topk(similarity, TOP_K, dim=1)
+                probs = values
+                preds = indices # indices in the train set
+                PROBS.append(probs.detach().cpu())
+                PREDS.append(preds.detach().cpu())
+                """
+                global_max = global_softmax_prob.max(1)
+                global_probs = global_max.values
+                global_preds = global_max.indices
+                
+                GLOBAL_PROBS.append(global_probs.detach().cpu())
+                GLOBAL_PREDS.append(global_preds.detach().cpu())
+                #lmax_m = logits_m.max(1)
+                #probs_m = lmax_m.values
+                #preds_m = lmax_m.indices
+    
+                #PRODS_M.append(probs_m.detach().cpu())
+                #PREDS_M.append(preds_m.detach().cpu())
+                
+                TARGETS.append(target.detach().cpu())
+                
+                global_loss = criterion(global_logits, target)
+                global_val_loss.append(global_loss.detach().cpu().numpy())
+    
+            global_val_loss = np.mean(global_val_loss)
+            GLOBAL_PROBS = torch.cat(GLOBAL_PROBS).numpy()
+            GLOBAL_PREDS = torch.cat(GLOBAL_PREDS).numpy()
+            #PRODS_M = torch.cat(PRODS_M).numpy()
+            #PREDS_M = torch.cat(PREDS_M).numpy()
+            
+            #PROBS = torch.cat(PROBS).numpy()
+            #PREDS = torch.cat(PREDS).numpy()
+            TARGETS = torch.cat(TARGETS)
+            
+            # Convert the train set indices to landmark ids
+            PREDS = gallery_landmark_id[PREDS]
         
         """
-        Compute global descriptor for validation set
-        """
-        for (data, target) in tqdm(valid_loader):
-            data, target = data.to(device), target.to(device)
-
-            feat, logits_m = model(data, target, training=False)
-            #softmax_prob = F.softmax(logits_m)
-            
-            # cosine similarity of the current validation image to the images in the train set
-            similarity = feat.mm(feats.t())
-            
-            # Retrieve top-k images from the train set
-            (values, indices) = torch.topk(similarity, TOP_K, dim=1)
-            probs = values
-            preds = indices # indices in the train set
-            PROBS.append(probs.detach().cpu())
-            PREDS.append(preds.detach().cpu())
-            
-            #lmax_m = logits_m.max(1)
-            #probs_m = lmax_m.values
-            #preds_m = lmax_m.indices
-
-            #PRODS_M.append(probs_m.detach().cpu())
-            #PREDS_M.append(preds_m.detach().cpu())
-            
-            TARGETS.append(target.detach().cpu())
-            
-            loss = criterion(logits_m, target)
-            val_loss.append(loss.detach().cpu().numpy())
-
-        val_loss = np.mean(val_loss)
-        #PRODS_M = torch.cat(PRODS_M).numpy()
-        #PREDS_M = torch.cat(PREDS_M).numpy()
-        
-        PROBS = torch.cat(PROBS).numpy()
-        PREDS = torch.cat(PREDS).numpy()
-        TARGETS = torch.cat(TARGETS)
-        
-        # Convert the train set indices to landmark ids
-        PREDS = gallery_landmark_id[PREDS]
-        
-        """
-        Get the final prediction of the landmark with the highest score from the top-k retrieved images
-        """
+        #Get the final prediction of the landmark with the highest score from the top-k retrieved images
         PROBS_F = []
         PREDS_F = []
         for i in tqdm(range(PREDS.shape[0])):
@@ -163,17 +239,27 @@ def val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion, g
             pred, conf = max(tmp.items(), key=lambda x: x[1])
             PREDS_F.append(pred)
             PROBS_F.append(conf)
-            
-            
-    if get_output:
-        return logits_m
-    else:
-        acc_m = (PREDS_F == TARGETS.numpy()).mean() * 100.
+        """
+        
+    if not global_only:
+        global_acc = (GLOBAL_PREDS == TARGETS.numpy()).mean() * 100.
+        attn_acc = (ATTN_PREDS == TARGETS.numpy()).mean() * 100.
         y_true = {idx: target if target >=0 else None for idx, target in enumerate(TARGETS)}
-        pred_f = {idx: (pred_cls, conf) for idx, (pred_cls, conf) in enumerate(zip(PREDS_F, PROBS_F))}
-        #y_pred_m = {idx: (pred_cls, conf) for idx, (pred_cls, conf) in enumerate(zip(PREDS_M, PRODS_M))}
-        gap_m = global_average_precision_score_val(y_true, pred_f)
-        return val_loss, acc_m, gap_m
+        #pred_f = {idx: (pred_cls, conf) for idx, (pred_cls, conf) in enumerate(zip(PREDS_F, PROBS_F))}
+        y_pred_global = {idx: (pred_cls, conf) for idx, (pred_cls, conf) in enumerate(zip(GLOBAL_PREDS, GLOBAL_PROBS))}
+        y_pred_attn = {idx: (pred_cls, conf) for idx, (pred_cls, conf) in enumerate(zip(ATTN_PREDS, ATTN_PROBS))}
+        global_gap = global_average_precision_score_val(y_true, y_pred_global)
+        attn_gap = global_average_precision_score_val(y_true, y_pred_attn)
+        
+        return global_val_loss, attn_val_loss, global_acc, attn_acc, global_gap, attn_gap
+    
+    else:
+        global_acc = (GLOBAL_PREDS == TARGETS.numpy()).mean() * 100.
+        y_true = {idx: target if target >=0 else None for idx, target in enumerate(TARGETS)}
+        y_pred_global = {idx: (pred_cls, conf) for idx, (pred_cls, conf) in enumerate(zip(GLOBAL_PREDS, GLOBAL_PROBS))}
+        global_gap = global_average_precision_score_val(y_true, y_pred_global)
+        
+        return global_val_loss, global_acc, global_gap
 
 def optimizers_func(cfg, model):
     #optimizer = 0
@@ -190,17 +276,8 @@ def optimizers_func(cfg, model):
 def main():
     # Load config file
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config-file",
-        default="configs/delg.yaml",
-        metavar="FILE",
-        help="path to config file",
-    )
-    parser.add_argument(
-        "options",
-        default=None,
-        nargs=argparse.REMAINDER
-    )
+    parser.add_argument("--config-file", default="configs/delg.yaml", metavar="FILE", help="path to config file")
+    parser.add_argument("--global-only", action='store_true', help="only train global part")
     args = parser.parse_args()
 
     cfg = get_cfg_defaults()
@@ -257,6 +334,7 @@ def main():
 
     # optimizer
     optimizer = optimizers_func(cfg, model)
+    #attn_optimizer = optimizers_func(cfg, model.attention)
 
     # logging
     ts = time.time()
@@ -265,7 +343,7 @@ def main():
     logger.info('numer of classes: %d' % num_classes)
     
     # train & valid loop
-    gap_m_max = 0.
+    #gap_m_max = 0.
     model_file = os.path.join(cfg.MODEL.MODEL_DIR, cfg.MODEL.BACKBONE + '_' + cfg.MODEL.MODEL + '.pth')
     for epoch in range(cfg.TRAIN.EPOCHS):
         
@@ -275,19 +353,39 @@ def main():
                     
         
         print(time.ctime(), 'Epoch:', epoch)
-        tic = time.time()
 
         train_loader = torch.utils.data.DataLoader(dataset_train, 
                                                    batch_size=cfg.TRAIN.BATCH_SIZE, 
                                                    num_workers=cfg.SYSTEM.NUM_WORKERS, 
                                                    shuffle=True)
-
-        train_loss = train_epoch(cfg, model, train_loader, optimizer, criterion)
-        val_loss, acc_m, gap_m = val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion)
         
-        toc = time.time()
-        content = 'epoch: %d, time: %.2f s, lr: %.5f, train loss: %.5f, validation loss: %.5f, acc_m: %.5f, gap_m: %.5f' % (epoch, toc - tic, optimizer.param_groups[0]['lr'], np.mean(train_loss), val_loss, acc_m, gap_m)
+        global_train_loss = train_global_epoch(cfg, model, train_loader, criterion, optimizer)
+        if not args.global_only:
+            attn_train_loss = train_local_epoch(cfg, model, train_loader, criterion, optimizer)
+        
+        
+        if not args.global_only:
+            global_val_loss, attn_val_loss, global_acc, attn_acc, global_gap, attn_gap = val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion, args.global_only)
+            content = 'epoch: %d, lr: %.5f, global train loss: %.5f, local train loss: %.5f, global validation loss: %.5f, local validation loss: %.5f, global_acc: %.5f, local_acc: %.5f, global_gap: %.5f, local_gap: %.5f' % (epoch, 
+                                                                                                                                                                                                                                 optimizer.param_groups[0]['lr'], 
+                                                                                                                                                                                                                                 np.mean(global_train_loss), 
+                                                                                                                                                                                                                                 np.mean(attn_train_loss), 
+                                                                                                                                                                                                                                 global_val_loss, 
+                                                                                                                                                                                                                                 attn_val_loss,
+                                                                                                                                                                                                                                 global_acc, 
+                                                                                                                                                                                                                                 attn_acc,
+                                                                                                                                                                                                                                 global_gap,
+                                                                                                                                                                                                                                 attn_gap)
+        else:
+            global_val_loss, global_acc, global_gap = val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion, args.global_only)
+            content = 'epoch: %d, lr: %.5f, global train loss: %.5f, global validation loss: %.5f, global_acc: %.5f, global_gap: %.5f' % (epoch, optimizer.param_groups[0]['lr'], np.mean(global_train_loss), global_val_loss, global_acc, global_gap)
+        
         logger.info(content)
+        torch.save({'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    }, model_file)  
+        """
         if gap_m > gap_m_max:
             print('saving best model')
             torch.save({'epoch': epoch,
@@ -295,6 +393,7 @@ def main():
                         'optimizer_state_dict': optimizer.state_dict(),
                         }, model_file)  
             gap_m_max = gap_m
+        """
         
 
 

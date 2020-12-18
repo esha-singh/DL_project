@@ -31,7 +31,6 @@ class ArcFace(nn.Module):
         self.num_classes = num_classes
         self.scale_factor = nn.Parameter(torch.ones(1)*scale_factor)
         self.arcface_margin = arcface_margin
-        #self.cosine_weights = cosine_weights
         self.cosine_weights = nn.Parameter(torch.FloatTensor(embedding_size, num_classes))
         self.reset_parameters()
     
@@ -83,11 +82,31 @@ class ArcFace(nn.Module):
         return cosine_sim_with_margin
 
 class AttentionModule(nn.Module):
-    def __init__(self, ):
+    def __init__(self, num_classes):
         super(AttentionModule, self).__init__()
         self.conv1 = nn.Conv2d(1024, 512, kernel_size=1)
-        
+        self.bn = nn.BatchNorm2d(512)
+        self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(512, 1, kernel_size=1)
+        self.softplus = nn.Softplus()
+        self.attn_classifier = nn.Linear(1024, num_classes)
+        
+        nn.init.normal_(self.attn_classifier.weight)
+        
+    def forward(self, local_f):
+        x = self.conv1(local_f)
+        x = self.bn(x)
+        x = self.relu(x)
+        
+        score = self.conv2(x)
+        prob = self.softplus(score)
+        norm_local_f = F.normalize(local_f, dim=-1)
+        #feats = norm_local_f*prob
+        feats = torch.mean(norm_local_f*prob, [2, 3], keepdims=False)
+        attn_logits = self.attn_classifier(feats)
+        print(attn_logits)
+        return attn_logits, feats, score, prob
+   
     
 class DelgGlobal(nn.Module):
     def __init__(self, num_classes, embedding_size=2048, pretrained=True):
@@ -95,26 +114,29 @@ class DelgGlobal(nn.Module):
         resnet = models.resnet.resnet50(pretrained=pretrained)
         self.backbone_to_conv4 = nn.Sequential(*list(resnet.children()))[:-3]
         self.backbone_conv5 = nn.Sequential(*list(resnet.children()))[-3]
-        #self.backbone = resnet50(pretrained=pretrained)
         self.gem_pool = GeM()
         self.embedding = nn.Linear(resnet.fc.in_features, embedding_size) # backbone_out_feature_size not sure. probably 2048
         self.prelu = nn.PReLU()
-        #self.cosine_weights = nn.Parameter(torch.rand(embedding_size, num_classes))
         self.arcface = ArcFace(embedding_size, num_classes)
+        self.attention = AttentionModule(num_classes)
         
         nn.init.normal_(self.embedding.weight)
         
-    def forward(self, image, labels=None, training=True):
+    def forward(self, image, labels=None, global_only=False, training=True):
         local_f = self.backbone_to_conv4(image)
         global_f = self.backbone_conv5(local_f)
-        x = self.gem_pool(global_f)
-        x = x.view(x.size(0), -1)
-        x = self.embedding(x)
-        x = self.prelu(x)
-        logits_m = self.arcface(x, labels, training)
+        global_f = self.gem_pool(global_f)
+        global_f = global_f.view(global_f.size(0), -1)
+        global_f = self.embedding(global_f)
+        global_f = self.prelu(global_f)
+        global_logits = self.arcface(global_f, labels, training)
         
-        return F.normalize(x), logits_m
+        if not global_only:
+            attn_logits, local_f, score, prob = self.attention(local_f)   
+            return F.normalize(global_f), global_logits, F.normalize(local_f), attn_logits, score, prob
         
+        else:
+            return F.normalize(global_f), global_logits
         
     
     
