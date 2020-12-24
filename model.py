@@ -85,32 +85,36 @@ class AttentionModule(nn.Module):
     def __init__(self, num_classes):
         super(AttentionModule, self).__init__()
         self.conv1 = nn.Conv2d(1024, 512, kernel_size=1)
-        self.bn = nn.BatchNorm2d(512)
+        self.bn1 = nn.BatchNorm2d(512)
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(512, 1, kernel_size=1)
+        self.bn2 = nn.BatchNorm2d(1)
         self.softplus = nn.Softplus()
         self.attn_classifier = nn.Linear(1024, num_classes)
         
         nn.init.normal_(self.attn_classifier.weight)
         
-    def forward(self, local_f):
-        x = self.conv1(local_f)
-        x = self.bn(x)
+    def forward(self, reconstructed_f):
+        x = self.conv1(reconstructed_f)
+        x = self.bn1(x)
         x = self.relu(x)
         
         score = self.conv2(x)
-        prob = self.softplus(score)
-        norm_local_f = F.normalize(local_f, dim=-1)
+        score = self.bn2(score)
+        prob = self.relu(score)
+        
+        norm_recon_f = F.normalize(reconstructed_f, dim=1)
         #feats = norm_local_f*prob
-        feats = torch.mean(norm_local_f*prob, [2, 3], keepdims=False)
+        feats = torch.mean(torch.mul(norm_recon_f, prob), [2, 3], keepdims=False)
+        #print(feats.shape)
         attn_logits = self.attn_classifier(feats)
-        print(attn_logits)
+        
         return attn_logits, feats, score, prob
    
     
-class DelgGlobal(nn.Module):
+class Delg(nn.Module):
     def __init__(self, num_classes, embedding_size=2048, pretrained=True):
-        super(DelgGlobal, self).__init__()
+        super(Delg, self).__init__()
         resnet = models.resnet.resnet50(pretrained=pretrained)
         self.backbone_to_conv4 = nn.Sequential(*list(resnet.children()))[:-3]
         self.backbone_conv5 = nn.Sequential(*list(resnet.children()))[-3]
@@ -119,6 +123,7 @@ class DelgGlobal(nn.Module):
         self.prelu = nn.PReLU()
         self.arcface = ArcFace(embedding_size, num_classes)
         self.attention = AttentionModule(num_classes)
+        #self.autoencoder = AutoEncoder()
         
         nn.init.normal_(self.embedding.weight)
         
@@ -132,8 +137,9 @@ class DelgGlobal(nn.Module):
         global_logits = self.arcface(global_f, labels, training)
         
         if not global_only:
-            attn_logits, local_f, score, prob = self.attention(local_f)   
-            return F.normalize(global_f), global_logits, F.normalize(local_f), attn_logits, score, prob
+            #reconstructed_f, encoded_f = self.autoencoder(local_f)
+            attn_logits, attn_f, score, prob = self.attention(local_f)   
+            return F.normalize(global_f), global_logits, F.normalize(attn_f), attn_logits, score, prob
         
         else:
             return F.normalize(global_f), global_logits

@@ -23,7 +23,7 @@ from logger import setup_logger
 from configs import get_cfg_defaults
 from dataset import LandmarkDataset, get_df, get_transforms
 from metrics import global_average_precision_score_val
-from model import DelgGlobal
+from model import Delg
 
 def set_seed(seed=0):
     random.seed(seed)
@@ -58,6 +58,11 @@ def parse_args():
 
 
 def train_global_epoch(cfg, model, loader, criterion, optimizer):
+    for param in model.backbone_to_conv4.parameters():
+        param.requires_grad = True
+    for param in model.backbone_conv5.parameters():
+        param.requires_grad = True
+        
     device = cfg.SYSTEM.DEVICE
     model = model.train()
     global_train_loss = []
@@ -143,14 +148,14 @@ def val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion, g
                 data, target = data.to(device), target.to(device)
             
                 global_f, global_logits, attn_f, attn_logits, score, prob = model(data, target, training=False)
-                global_softmax_prob = F.softmax(global_logits, dim=1)
-                attn_softmax_prob = F.softmax(attn_logits, dim=1)
+                #global_softmax_prob = F.softmax(global_logits, dim=1)
+                #attn_softmax_prob = F.softmax(attn_logits, dim=1)
                 
-                global_max = global_softmax_prob.max(1)
+                global_max = global_logits.max(1)
                 global_probs = global_max.values
                 global_preds = global_max.indices
                 
-                attn_max = attn_softmax_prob.max(1)
+                attn_max = attn_logits.max(1)
                 attn_probs = attn_max.values
                 attn_preds = attn_max.indices
                 
@@ -243,6 +248,10 @@ def val_epoch(cfg, model, df_gallery, valid_loader, gallery_loader, criterion, g
         
     if not global_only:
         global_acc = (GLOBAL_PREDS == TARGETS.numpy()).mean() * 100.
+        print(np.linalg.norm(ATTN_PREDS))
+        print(ATTN_PREDS)
+        print(GLOBAL_PREDS)
+        print(np.linalg.norm(TARGETS))
         attn_acc = (ATTN_PREDS == TARGETS.numpy()).mean() * 100.
         y_true = {idx: target if target >=0 else None for idx, target in enumerate(TARGETS)}
         #pred_f = {idx: (pred_cls, conf) for idx, (pred_cls, conf) in enumerate(zip(PREDS_F, PROBS_F))}
@@ -317,8 +326,7 @@ def main():
                                                  num_workers=cfg.SYSTEM.NUM_WORKERS)
     
     # model
-    if cfg.MODEL.MODEL == 'delg_global':
-        model = DelgGlobal(num_classes, embedding_size=1024, pretrained=True)  
+    model = Delg(num_classes, embedding_size=1024, pretrained=True)  
     model = model.to(device)
     #model = DDP(model, device_ids=[0])
     
