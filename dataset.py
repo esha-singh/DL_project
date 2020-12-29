@@ -8,12 +8,12 @@ November 18, 2020
 import os
 import matplotlib.pyplot as plt
 import cv2
-import random
+#import random
 import albumentations as A
 import numpy as np
 import pandas as pd
 import torch
-from tqdm import tqdm as tqdm
+#from tqdm import tqdm as tqdm
 from torch.utils.data import Dataset
 
 class LandmarkDataset(Dataset):

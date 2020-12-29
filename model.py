@@ -81,6 +81,22 @@ class ArcFace(nn.Module):
         cosine_sim_with_margin = torch.cos(final_theta)
         return cosine_sim_with_margin
 
+
+class Autoencoder(nn.Module):
+    def __init__(self, ):
+        super(Autoencoder, self).__init__()
+        self.encoder = nn.Conv2d(1024, 128, kernel_size=1)
+        self.decoder = nn.Conv2d(128, 1024, kernel_size=1)
+        self.relu = nn.ReLU()
+        
+    def forward(self, local_f):
+        encoded_f = self.encoder(local_f)
+        decoded_f = self.decoder(encoded_f)
+        decoded_f = self.relu(decoded_f)
+        
+        return encoded_f, decoded_f
+
+
 class AttentionModule(nn.Module):
     def __init__(self, num_classes):
         super(AttentionModule, self).__init__()
@@ -90,9 +106,7 @@ class AttentionModule(nn.Module):
         self.conv2 = nn.Conv2d(512, 1, kernel_size=1)
         self.bn2 = nn.BatchNorm2d(1)
         self.softplus = nn.Softplus()
-        self.attn_classifier = nn.Linear(1024, num_classes)
         
-        nn.init.normal_(self.attn_classifier.weight)
         
     def forward(self, reconstructed_f):
         x = self.conv1(reconstructed_f)
@@ -100,16 +114,18 @@ class AttentionModule(nn.Module):
         x = self.relu(x)
         
         score = self.conv2(x)
-        score = self.bn2(score)
-        prob = self.relu(score)
+        #score = self.bn2(score)
+        prob = self.softplus(score)
+        #print(reconstructed_f.shape)
         
         norm_recon_f = F.normalize(reconstructed_f, dim=1)
         #feats = norm_local_f*prob
         feats = torch.mean(torch.mul(norm_recon_f, prob), [2, 3], keepdims=False)
         #print(feats.shape)
-        attn_logits = self.attn_classifier(feats)
+        #attn_logits = self.attn_classifier(feats)
+        #print(attn_logits.shape)
         
-        return attn_logits, feats, score, prob
+        return feats, score, prob
    
     
 class Delg(nn.Module):
@@ -123,9 +139,13 @@ class Delg(nn.Module):
         self.prelu = nn.PReLU()
         self.arcface = ArcFace(embedding_size, num_classes)
         self.attention = AttentionModule(num_classes)
-        #self.autoencoder = AutoEncoder()
+        self.attn_classifier = nn.Linear(1024, num_classes)
+        self.autoencoder = Autoencoder()
         
         nn.init.normal_(self.embedding.weight)
+        nn.init.normal_(self.attn_classifier.weight)
+        #nn.init.normal_(self.embedding.bias)
+        #nn.init.normal_(self.attn_classifier.bias)
         
     def forward(self, image, labels=None, global_only=False, training=True):
         local_f = self.backbone_to_conv4(image)
@@ -137,12 +157,13 @@ class Delg(nn.Module):
         global_logits = self.arcface(global_f, labels, training)
         
         if not global_only:
-            #reconstructed_f, encoded_f = self.autoencoder(local_f)
-            attn_logits, attn_f, score, prob = self.attention(local_f)   
-            return F.normalize(global_f), global_logits, F.normalize(attn_f), attn_logits, score, prob
+            encoded_f, reconstructed_f = self.autoencoder(local_f)
+            attn_f, score, prob = self.attention(reconstructed_f)   
+            attn_logits = self.attn_classifier(attn_f)
+            return global_f, global_logits, local_f, reconstructed_f, encoded_f, attn_logits, score, prob
         
         else:
-            return F.normalize(global_f), global_logits
+            return global_f, global_logits
         
     
     
