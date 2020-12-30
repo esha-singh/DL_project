@@ -1,0 +1,28 @@
+2020-12-29 13:04:01,175 testing_info INFO: DATASET:
+  IMAGE_SIZE: 128
+  TEST_DATA_DIR: test
+  TRAIN_CSV: train_sub_class.csv
+  TRAIN_DATA_DIR: train
+EVAL:
+  BATCH_SIZE: 1
+  MODEL_PATH: models/resnet50_delg.pth
+  SAVE_DIR: ./output
+MODEL:
+  BACKBONE: resnet50
+  MODEL: delg
+  MODEL_DIR: models
+SYSTEM:
+  DEVICE: cuda:0
+  NUM_WORKERS: 4
+TRAIN:
+  BATCH_SIZE: 16
+  EPOCHS: 30
+  FREEZE_BACKBONE: False
+  OPTIM:
+    ADAM_BETAS: (0.9, 0.95)
+    BASE_LR: 0.002
+    LR_DECAY_FREQUENCY: 2
+    LR_DECAY_RATE: 0.8
+    OPTIMIZER: sgd
+    SGD_MOMENTUM: 0.9
+2020-12-29 13:46:08,125 testing_info INFO: Global GAP Score: 0.07323, Global Accuracy: 64.28571, GAP Score: 0.08580, Accuracy: 64.28571
