@@ -1,6 +1,6 @@
 # DL_project
 
-Repository for CSCI 8980/5980 Deep Learning Project on Google Landmark Recognition Challenge 2020. 
+Repository for Deep Learning Project on Google Landmark Recognition Challenge 2020. 
 
 ## Data preparation
 Download dataset from [Kaggle Google Landmark Recognition 2020](https://www.kaggle.com/c/landmark-recognition-2020/data)
